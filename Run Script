@@ -1,0 +1,96 @@
+!pip install torch torchaudio transformers
+!pip install sentencepiece
+!pip install datasets soundfile
+!transformers-cli download facebook/s2t-medium-mustc-multilingual-st
+import torch
+from transformers import Speech2TextProcessor, Speech2TextForConditionalGeneration
+from datasets import load_dataset
+import soundfile as sf
+import os
+import time
+import psutil
+from google.colab import drive
+drive.mount('/content/drive')
+model = Speech2TextForConditionalGeneration.from_pretrained("facebook/s2t-medium-mustc-multilingual-st")
+processor = Speech2TextProcessor.from_pretrained("facebook/s2t-medium-mustc-multilingual-st")
+#Set path to audio folder
+audio_folder = '/content/drive/My Drive/Ted'
+
+#Set the duration of each chunk (in seconds)
+chunk_duration = 30
+
+#Get list of all files in folder
+all_files = os.listdir(audio_folder)
+
+#Filter out only audio files 
+audio_files = [filename for filename in all_files if filename.endswith((".wav", ".flac", ".mp3"))]
+
+#Initialize the speech-to-text model and processor
+model = Speech2TextForConditionalGeneration.from_pretrained("facebook/s2t-medium-mustc-multilingual-st")
+processor = Speech2TextProcessor.from_pretrained("facebook/s2t-medium-mustc-multilingual-st")
+
+#Process each audio file
+for audio_file in audio_files:
+    #Get CPU usage and memory consumption before loading audio file
+    cpu_percent_start = psutil.cpu_percent()
+    memory_mb_start = psutil.virtual_memory().used / 1e6
+
+    try:
+        #Load the audio file
+        audio, sample_rate = sf.read(os.path.join(audio_folder, audio_file))
+
+        #Initialize the latency_ms_total variable
+        latency_ms_total = 0
+
+        #Check audio duration
+        audio_duration = len(audio) / sample_rate
+        if audio_duration <= 40:
+            # Process audio file directly if duration is 40 seconds or shorter
+            start_time = time.time()
+            inputs = processor(audio, sampling_rate=sample_rate, return_tensors="pt")
+            generated_ids = model.generate(
+                inputs["input_features"],
+                attention_mask=inputs["attention_mask"],
+                forced_bos_token_id=processor.tokenizer.lang_code_to_id["ru"],
+                max_length=4000,
+                num_beams=18,
+            )
+            translation_ru = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+            end_time = time.time()
+            latency_ms = (end_time - start_time) * 1000
+            latency_ms_total += latency_ms
+             #Get CPU usage and memory consumption
+            cpu_percent = psutil.cpu_percent()
+            memory_mb = psutil.virtual_memory().used / 1e6
+            print(f"Translation of {audio_file}: {translation_ru}")
+            print(f"Latency for audio file {audio_file}: {latency_ms/1000:.2f} seconds")
+            print(f"CPU usage for audio file {audio_file}: {cpu_percent:.2f}%")
+            print(f"Memory consumption for audio file {audio_file}: {memory_mb:.2f} MB")
+        else:
+            #Split the audio into chunks and process each chunk
+            num_chunks = int(audio_duration / chunk_duration) + 1
+            chunks = [audio[i * sample_rate * chunk_duration: (i+1) * sample_rate * chunk_duration] for i in range(num_chunks)]
+
+            translation_ru = ""
+            for chunk in chunks:
+                inputs = processor(chunk, sampling_rate=sample_rate, return_tensors="pt")
+                start_time = time.time()
+                generated_ids = model.generate(
+                    inputs["input_features"],
+                    attention_mask=inputs["attention_mask"],
+                    forced_bos_token_id=processor.tokenizer.lang_code_to_id["ru"],
+                    max_length=4000,
+                    num_beams=18,
+                )
+                end_time = time.time()
+                latency_ms = (end_time - start_time) * 1000
+                latency_ms_total += latency_ms
+                translation_chunk = processor.batch_decode(generated_ids, skip_special_tokens=True)
+                translation_ru += translation_chunk[0] + " "
+
+            print(f"Total latency: {latency_ms_total:.2f} ms")
+            #Print the translation
+            print(f"Translation of {audio_file}: {translation_ru}")
+    except Exception as e:
+        #Print an error message if the audio file cannot be opened
+        print(f"Error opening {audio_file}: {e}")
